@@ -1,0 +1,193 @@
+################################################################################################################
+## What will Trump's RCP average job approval be at end of day March 31? #######################################
+## https://www.predictit.org/Market/3989/What-will-Trump's-RCP-average-job-approval-be-at-end-of-day-March-31 ##
+## http://dyn.realclearpolitics.com/epolls/other/president_trump_job_approval-6179.html#polls ##################
+################################################################################################################
+## Wanlu Shi ##
+###############
+
+####################
+## Load Libraries ##
+library(rjson)
+library(mvtnorm)
+####################
+
+#################
+## Scrape Data ##
+PresidentTrumpJobApproval_page <- readLines('https://www.realclearpolitics.com/epolls/json/6179_historical.js')
+PresidentTrumpJobApproval_page_formatted <- substring(PresidentTrumpJobApproval_page, 13, nchar(PresidentTrumpJobApproval_page) - 2)
+PresidentTrumpJobApproval_page_json <- fromJSON(PresidentTrumpJobApproval_page_formatted)
+PresidentTrumpJobApproval_polls <- PresidentTrumpJobApproval_page_json
+PresidentTrumpJobApproval_polls
+#################
+
+################
+## Clean Data ##
+PresidentTrumpJobApproval_getDate <- function(rowNumber) {
+  date.string <- substring(PresidentTrumpJobApproval_polls$poll$rcp_avg[rowNumber][[1]]$date, 6, 16)
+  return(as.Date(date.string, "%d %B %Y"))
+}
+PresidentTrumpJobApproval_getApproval <- function(rowNumber) {
+  return(PresidentTrumpJobApproval_polls$poll$rcp_avg[rowNumber][[1]]$candidate[[1]]$value)
+}
+################
+
+#################################################################
+## Use all Historical Data (since 2017-01-27) as Training Data ##
+ndays <- Sys.Date() - as.Date("2017-01-27") + 1
+## Today is 02/12/2018, so ndays = 382 ##
+ndays
+PresidentTrumpJobApproval_df <- data.frame(as.Date(sapply(1:ndays,PresidentTrumpJobApproval_getDate), origin = "1970-01-01"),
+                                           as.numeric(sapply(1:ndays,PresidentTrumpJobApproval_getApproval)))
+names(PresidentTrumpJobApproval_df) <- c("date","approval")
+PresidentTrumpJobApproval_df
+nrow(PresidentTrumpJobApproval_df)
+#################################################################
+
+###########################################
+## Get Rid of Duplicates (e.g. Weekends) ##
+PresidentTrumpJobApproval_df_shortened <- PresidentTrumpJobApproval_df[cumsum(rle(as.numeric(PresidentTrumpJobApproval_df[,2]))$lengths), ]
+PresidentTrumpJobApproval_df_shortened
+nrow(PresidentTrumpJobApproval_df_shortened)
+x <- as.integer(PresidentTrumpJobApproval_df_shortened$date)
+y <- PresidentTrumpJobApproval_df_shortened$app
+x
+y
+###########################################
+
+###############
+## Plot Data ##
+require(ggplot2)
+trainingdata <- ggplot() +
+  geom_point(data = PresidentTrumpJobApproval_df_shortened, aes(as.Date(x, origin = "1970-01-01"), y), shape = 4, colour = "aquamarine4") +
+  ggtitle("Trump's RCP Average Job Approval Rates \n Training") +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  ylab("Percent Approval") +
+  xlab("Date")
+trainingdata
+###############
+
+######################################
+## Define Rational Quadratic Kernel ##
+## Note the postive parameters are parameterized by their log ##
+n_params <- 5
+rq <- function(params, i, j) {
+  h = exp(params[1])
+  alpha = exp(params[2])
+  l = exp(params[3])
+  return(h^2 * (1 + (i-j)^2/(2*alpha*l^2))^(-alpha))
+}
+######################################
+
+##################################
+## Create the Covariance Matrix ##
+cov_matrix <- function(params, x1, x2) {
+  K = matrix(0, nrow = length(x1), ncol = length(x2))
+  for (i in 1:length(x1)) {
+    for (j in 1:length(x2)) {
+      K[i,j] = rq(params, x1[i], x2[j])
+    }
+  }
+  return(K)
+}
+##################################
+
+###################
+## Loss Function ##
+neg_log_marginal_likelihood <- function(params, x, y){
+  noise_scale = exp(params[4])
+  mean_param = params[5]
+  K_xx = cov_matrix(params, x, x) + noise_scale * diag(length(x))
+  return(-1 * dmvnorm(y, mean = rep(mean_param, length(y)), sigma = K_xx, log = TRUE))
+}
+###################
+
+######################
+## Make Predictions ##
+predictive_mean_and_cov <- function(params, x, y, x_star) {
+  noise_scale = exp(params[4])
+  mean_param = params[5]
+  K_xx = cov_matrix(params,x,x) + noise_scale*diag(length(x))
+  K_xx_star = cov_matrix(params, x, x_star)
+  K_x_star_x_star = cov_matrix(params, x_star, x_star)
+  pred_mean = mean_param + t(K_xx_star) %*% solve(K_xx) %*% (y - mean_param)
+  pred_cov = K_x_star_x_star - t(K_xx_star) %*% solve(K_xx) %*% K_xx_star
+  return(list(pred_mean, pred_cov))
+}
+######################
+
+################################################
+## Use Optim Function to Get Hyper-Parameters ##
+set.seed(12345)
+optimized_params <- optim(rnorm(n_params), neg_log_marginal_likelihood, x = x, y = y, method = 'CG')
+## system.time(optimized_params <- optim(rnorm(n_params), neg_log_marginal_likelihood, x = x, y = y, method = 'CG')) ##
+##  user    system elapsed ##
+## 695.431   8.377 721.156 ##
+params <- optimized_params$par
+params
+## 3.526974 -8.332729  4.981978 -3.487342  1.173399 ##
+################################################
+
+################################################################
+## Make Plot with Predictive Mean and 95% Confidence Interval ##
+plot_predictions <- function(delta, params, x, y) {
+  x_star = (min(x)):(max(x) + delta)
+  predictions = predictive_mean_and_cov(params, x, y, x_star)
+  pred_mean = predictions[[1]]
+  pred_cov = predictions[[2]]
+  
+  marg_std = sqrt(diag(pred_cov))
+  lower_bound = pred_mean - qnorm(.975) * marg_std
+  upper_bound = pred_mean + qnorm(.975) * marg_std
+  
+  x_date = as.Date(x, origin = "1970-01-01")
+  x_star_date = as.Date(x_star, origin = "1970-01-01")
+  
+  ggplot() +
+    geom_point(data = PresidentTrumpJobApproval_df_shortened, aes(x_date, y), shape = 4, colour = "aquamarine4") +
+    geom_line(data = NULL, aes(x_star_date, pred_mean), colour = "plum3", size = 0.5) +
+    geom_ribbon(aes(x = x_star_date, ymin = lower_bound, ymax = upper_bound), fill = "plum4", alpha = 0.3) +
+    ggtitle("Trump's RCP Average Job Approval Rates \n Prediction") +
+    theme_bw() +
+    theme(plot.title = element_text(hjust = 0.5)) +
+    ylab("Percent Approval") +
+    xlab("Date")
+}
+################################################################
+
+########################
+## Graph Next 60 Days ##
+days_ahead <- 60
+plot_predictions(days_ahead, params, x, y)
+########################
+
+########################################
+## Get Predictions for March 31, 2018 ##
+target_date <- as.integer(as.Date("2018-03-31"))
+predictions <- predictive_mean_and_cov(params, x, y, c(target_date))
+mu <- predictions[[1]]
+stdev <- sqrt(predictions[[2]])
+as.Date(target_date, origin = "1970-01-01")
+predictions
+## 40.74782 2.245303 ##
+mu; stdev
+## 40.74782 1.498433##
+########################################
+
+##########################################################
+## Calculate the Probabilities of each PredictIt Bucket ##
+t1 <- 1 - pnorm(40.95,mean = mu, sd = stdev)
+t2 <- pnorm(40.95, mean = mu, sd = stdev) - pnorm(38.95, mean = mu, sd = stdev)
+t3 <- pnorm(38.95, mean = mu, sd = stdev) - pnorm(36.95, mean = mu, sd = stdev)
+t4 <- pnorm(36.95, mean = mu, sd = stdev) - pnorm(34.95, mean = mu, sd = stdev)
+t5 <- pnorm(34.95, mean = mu, sd = stdev) - pnorm(32.95, mean = mu, sd = stdev)
+t6 <- pnorm(32.95, mean = mu, sd = stdev)
+##########################################################
+
+#################################
+## Display Rounded Predictions ##
+preds <- c(t1,t2,t3,t4,t5,t6)
+round(preds, 4)
+## 0.4463 0.4386 0.1095 0.0056 0.0001 0.0000 ##
+#################################
